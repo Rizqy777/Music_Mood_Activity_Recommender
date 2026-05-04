@@ -1,0 +1,9 @@
+.venv
+data_lake/
+chats
+docs
+logs
+.specstory
+.vscode
+aws_credentials.env
+
