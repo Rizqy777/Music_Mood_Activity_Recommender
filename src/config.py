@@ -46,6 +46,8 @@ def _normalize_aws_env() -> None:
         "aws_session_token": "AWS_SESSION_TOKEN",
         "aws_default_region": "AWS_DEFAULT_REGION",
         "aws_bucket_name": "AWS_BUCKET_NAME",
+        "AWS_BUCKET": "AWS_BUCKET_NAME",
+        "S3_ENDPOINT_URL": "AWS_S3_ENDPOINT_URL",
     }
     for source, target in aliases.items():
         if source in os.environ and target not in os.environ:
@@ -136,7 +138,7 @@ def load_settings() -> Settings:
         use_s3=_env_bool("USE_S3", True),
         kafka_bootstrap_servers=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
         kafka_group_id=os.getenv("KAFKA_GROUP_ID", "music-recommender-pipeline"),
-        max_rows_per_dataset=_env_int("MAX_ROWS_PER_DATASET", 200),
+        max_rows_per_dataset=_env_int("MAX_ROWS_PER_DATASET", None),
         producer_batch_size=_env_int("PRODUCER_BATCH_SIZE", 25) or 500,
         producer_batch_delay_seconds=_env_float("PRODUCER_BATCH_DELAY_SECONDS", 0.5),
         consumer_timeout_seconds=_env_int("CONSUMER_TIMEOUT_SECONDS", 20) or 20,

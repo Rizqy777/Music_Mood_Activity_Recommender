@@ -74,10 +74,28 @@ class MusicActivityRecommender:
             scored[f"user_mood_{known_mood}"] = 1.0 if known_mood == mood else 0.0
         for col, value in activity_profile.items():
             scored[col] = value
+        proba_cols = ["proba_sad", "proba_happy", "proba_energetic", "proba_calm"]
+        if all(col in scored.columns for col in proba_cols):
+            effective_proba = scored[proba_cols].copy()
+            calm_signal = (
+                0.55 * (1.0 - scored["energy"].clip(0.0, 1.0))
+                + 0.25 * scored["acousticness"].clip(0.0, 1.0)
+                + 0.20 * (1.0 - scored["danceability"].clip(0.0, 1.0))
+            ).clip(0.0, 1.0)
+            effective_proba["proba_calm"] = (0.60 * scored["proba_calm"] + 0.40 * calm_signal).clip(0.0, 1.0)
+            scored["predicted_mood"] = effective_proba.idxmax(axis=1).str.replace("proba_", "")
         scored["recommendation_score_nn"] = self.model.predict(scored[MODEL_INPUT_COLS]).clip(0.0, 1.0)
         scored["context_score"] = contextual_score(scored, mood, activity_profile)
         mood_probability_col = f"proba_{mood}"
-        scored["user_mood_probability"] = scored[mood_probability_col]
+        if mood == "calm" and all(col in scored.columns for col in proba_cols):
+            calm_signal = (
+                0.55 * (1.0 - scored["energy"].clip(0.0, 1.0))
+                + 0.25 * scored["acousticness"].clip(0.0, 1.0)
+                + 0.20 * (1.0 - scored["danceability"].clip(0.0, 1.0))
+            ).clip(0.0, 1.0)
+            scored["user_mood_probability"] = (0.60 * scored["proba_calm"] + 0.40 * calm_signal).clip(0.0, 1.0)
+        else:
+            scored["user_mood_probability"] = scored[mood_probability_col]
         popularity = scored["popularity"].fillna(0).clip(0, 100) / 100 if "popularity" in scored else 0.0
         scored["recommendation_score"] = (
             0.58 * scored["context_score"]
@@ -85,6 +103,20 @@ class MusicActivityRecommender:
             + 0.10 * scored["recommendation_score_nn"]
             + 0.05 * popularity
         ).clip(0.0, 1.0)
+        if mood in {"calm", "sad"}:
+            scored["recommendation_score"] = (
+                0.55 * scored["context_score"]
+                + 0.30 * scored["user_mood_probability"]
+                + 0.10 * scored["recommendation_score_nn"]
+                + 0.05 * popularity
+            ).clip(0.0, 1.0)
+            if mood == "calm":
+                calm_boost = scored["proba_calm"].clip(0.05, 1.0)
+                scored["recommendation_score"] = (scored["recommendation_score"] * (0.85 + 0.30 * calm_boost)).clip(
+                    0.0, 1.0
+                )
+        mismatch_penalty = 0.85 if mood in {"calm", "sad"} else 0.90
+        scored.loc[scored["predicted_mood"] != mood, "recommendation_score"] *= mismatch_penalty
         exact_mood_matches = int(scored["predicted_mood"].eq(mood).sum())
         if exact_mood_matches >= top_k:
             scored.loc[scored["predicted_mood"] != mood, "recommendation_score"] *= 0.62
@@ -110,7 +142,8 @@ class MusicActivityRecommender:
             "track_id",
         ]
         available = [col for col in columns if col in scored.columns]
-        return scored.sort_values("recommendation_score", ascending=False).head(top_k)[available]
+        result = scored.sort_values("recommendation_score", ascending=False).head(top_k)[available].copy()
+        return result
 
 
 def normalize_mood(user_mood: str) -> str:
@@ -175,6 +208,11 @@ def desired_mood_weights(user_mood: str, activity_profile: dict[str, float | str
         weights["sad"] += 0.25
         weights["energetic"] += 0.22
         weights["happy"] *= 0.40
+    elif user_mood == "calm":
+        weights["calm"] += 0.25
+        if energy > 0.65:
+            weights["calm"] += 0.20
+            weights["energetic"] += 0.08
     elif calm > 0.65:
         weights["calm"] += 0.22
         weights["energetic"] *= 0.45
@@ -209,4 +247,6 @@ def build_reason(user_mood: str, activity_name: str) -> str:
         return "Asume un momento de pausa: baja energia y un ritmo mas suave."
     if activity_name == "relajacion":
         return "Busca un ambiente calmado y con foco suave para reflexionar o desconectar."
+    if activity_name == "actividad_general":
+        return "No se detecta una actividad clara. Prueba con algo mas especifico para afinar."
     return "Equilibra emocion indicada, actividad y caracteristicas musicales."

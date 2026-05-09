@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import html
+import random
 from pathlib import Path
 
 import gradio as gr
@@ -10,21 +11,33 @@ from src.recommender import MusicActivityRecommender
 
 RECOMMENDER = MusicActivityRecommender()
 ROOT = Path(__file__).resolve().parent
+POOL_MULTIPLIER = 30
+MIN_POOL_SIZE = 50
+MAX_POOL_SIZE = 1000
 
 
 def load_banner_data() -> str:
-  banner_path = ROOT / "images" / "ChatGPT Image 30 abr 2026, 13_11_02.png"
-  if not banner_path.exists():
-    return ""
-  encoded = base64.b64encode(banner_path.read_bytes()).decode("ascii")
-  return f"data:image/png;base64,{encoded}"
+    banner_path = ROOT / "images" / "ChatGPT Image 30 abr 2026, 13_11_02.png"
+    if not banner_path.exists():
+        return ""
+    encoded = base64.b64encode(banner_path.read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 BANNER_DATA = load_banner_data()
 
 
-def recommend(user_mood: str, activity: str, top_k: int):
-    recommendations = RECOMMENDER.recommend(user_mood, activity, top_k=int(top_k))
+def sample_recommendations(pool, top_k: int, seed: int):
+  if pool is None or pool.empty:
+    return pool
+  rng = random.Random(seed)
+  indices = list(pool.index)
+  rng.shuffle(indices)
+  selected = pool.loc[indices[:top_k]].copy()
+  return selected.reset_index(drop=True)
+
+
+def format_recommendations(recommendations):
     display_df = recommendations.rename(
         columns={
             "track_name": "Cancion",
@@ -41,20 +54,114 @@ def recommend(user_mood: str, activity: str, top_k: int):
             "track_id": "Track ID",
         }
     )
-    return render_cards(display_df), display_df
+    warning = None
+    if "Actividad interpretada" in display_df.columns:
+        if (display_df["Actividad interpretada"] == "actividad_general").any():
+            warning = "No se detecta actividad clara. Escribe algo mas especifico."
+    return render_cards(display_df, warning=warning), display_df
 
 
-def render_cards(recommendations):
+def get_recommendation_ids(frame):
+    if frame is None or len(frame) == 0:
+        return []
+    if "track_id" in frame.columns:
+        return frame["track_id"].astype(str).tolist()
+    return frame.index.astype(str).tolist()
+
+
+def filter_unseen(pool, seen_ids):
+    if pool is None or len(pool) == 0:
+        return pool
+    if not seen_ids:
+        return pool
+    seen_set = {str(item) for item in seen_ids}
+    if "track_id" in pool.columns:
+        mask = ~pool["track_id"].astype(str).isin(seen_set)
+    else:
+        mask = ~pool.index.astype(str).isin(seen_set)
+    return pool[mask].copy()
+
+
+def build_pool(user_mood: str, activity: str, pool_size: int):
+    return RECOMMENDER.recommend(user_mood, activity, top_k=pool_size)
+
+
+def recommend(user_mood: str, activity: str, top_k: int):
+    recommendations = RECOMMENDER.recommend(user_mood, activity, top_k=int(top_k))
+    return format_recommendations(recommendations)
+
+
+def recommend_with_pool(user_mood: str, activity: str, top_k: int):
+    top_k = int(top_k)
+    pool_size = min(max(top_k * POOL_MULTIPLIER, MIN_POOL_SIZE), MAX_POOL_SIZE)
+    recommendations = build_pool(user_mood, activity, pool_size)
+    selected = sample_recommendations(recommendations, top_k, seed=0)
+    cards_html, display_df = format_recommendations(selected)
+    seen_ids = get_recommendation_ids(selected)
+    query_state = {"mood": user_mood, "activity": activity}
+    return cards_html, display_df, recommendations, 0, seen_ids, pool_size, query_state
+
+
+def refresh_recommendations(top_k: int, pool, seed: int, seen_ids, pool_size: int, query_state):
+    if not query_state:
+        return (
+            "<div class='warning-pill'>Ejecuta una busqueda primero.</div>",
+            None,
+            pool,
+            seed,
+            seen_ids,
+            pool_size,
+            query_state,
+        )
+    seen_ids = seen_ids or []
+    top_k = int(top_k)
+    available = filter_unseen(pool, seen_ids)
+    if available is None or len(available) < top_k:
+        next_pool_size = min(max(pool_size * 2, MIN_POOL_SIZE), MAX_POOL_SIZE)
+        if next_pool_size > (pool_size or 0):
+            pool = build_pool(query_state["mood"], query_state["activity"], next_pool_size)
+            pool_size = next_pool_size
+            available = filter_unseen(pool, seen_ids)
+    if available is None or len(available) == 0:
+        return (
+            "<div class='warning-pill'>No quedan opciones nuevas. Haz otra busqueda.</div>",
+            None,
+            pool,
+            seed,
+            seen_ids,
+            pool_size,
+            query_state,
+        )
+    new_seed = int(seed) + 1
+    selected = sample_recommendations(available, top_k, seed=new_seed)
+    cards_html, display_df = format_recommendations(selected)
+    new_seen = [*seen_ids, *get_recommendation_ids(selected)]
+    return cards_html, display_df, pool, new_seed, new_seen, pool_size, query_state
+
+
+def render_cards(recommendations, warning=None):
     cards = []
     for index, row in recommendations.iterrows():
         score = float(row.get("Score", 0.0))
         confidence = float(row.get("Confianza mood", 0.0))
         spotify_url = str(row.get("Spotify", ""))
+        track_id = str(row.get("Track ID", "")).strip()
         spotify_link = ""
         if spotify_url.startswith("https://open.spotify.com/"):
             spotify_link = (
                 f'<a class="spotify-link" href="{html.escape(spotify_url)}" '
                 f'target="_blank" rel="noopener noreferrer">Abrir en Spotify</a>'
+            )
+        spotify_player = ""
+        if track_id and track_id.lower() != "nan":
+            safe_track_id = html.escape(track_id, quote=True)
+            spotify_player = (
+                '<iframe class="spotify-player" '
+                f'src="https://open.spotify.com/embed/track/{safe_track_id}?utm_source=generator" '
+                'title="Reproductor de Spotify" '
+                'width="100%" height="80" frameborder="0" '
+                'allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" '
+                'loading="lazy"></iframe>'
             )
         cards.append(
             f"""
@@ -70,7 +177,10 @@ def render_cards(recommendations):
                   <span>{html.escape(str(row.get("Actividad interpretada", "-")))}</span>
                 </div>
                 <p class="reason">{html.escape(str(row.get("Motivo", "")))}</p>
-                {spotify_link}
+                <div class="song-actions">
+                  {spotify_link}
+                </div>
+                {spotify_player}
               </div>
               <div class="score-box">
                 <strong>{score:.2f}</strong>
@@ -80,7 +190,10 @@ def render_cards(recommendations):
             </article>
             """
         )
-    return f'<section class="cards-grid">{"".join(cards)}</section>'
+    warning_html = ""
+    if warning:
+        warning_html = f'<div class="warning-pill">{html.escape(str(warning))}</div>'
+    return f'{warning_html}<section class="cards-grid">{"".join(cards)}</section>'
 
 
 CSS = """
@@ -233,6 +346,33 @@ body, .gradio-container {
   text-decoration: none !important;
   width: fit-content;
 }
+.song-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.spotify-player {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  margin-top: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: #101418;
+}
+.warning-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #3a4250;
+  background: #1e242e;
+  color: #f2c57c;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
 .score-box {
   min-width: 86px;
   align-self: stretch;
@@ -290,10 +430,26 @@ with gr.Blocks(title="Music Mood Activity Recommender") as demo:
             )
             top_k = gr.Slider(1, 10, value=5, step=1, label="Numero de canciones", scale=1)
         button = gr.Button("Buscar canciones", elem_classes=["primary-button"])
+        refresh = gr.Button("Refrescar opciones")
+
+    pool_state = gr.State(None)
+    seed_state = gr.State(0)
+    seen_state = gr.State([])
+    pool_size_state = gr.State(0)
+    query_state = gr.State(None)
 
     cards = gr.HTML(label="Recomendaciones")
     output = gr.Dataframe(label="Detalle tecnico", wrap=True)
-    button.click(recommend, inputs=[mood, activity, top_k], outputs=[cards, output])
+    button.click(
+        recommend_with_pool,
+        inputs=[mood, activity, top_k],
+        outputs=[cards, output, pool_state, seed_state, seen_state, pool_size_state, query_state],
+    )
+    refresh.click(
+        refresh_recommendations,
+        inputs=[top_k, pool_state, seed_state, seen_state, pool_size_state, query_state],
+        outputs=[cards, output, pool_state, seed_state, seen_state, pool_size_state, query_state],
+    )
 
     gr.Examples(
         examples=[

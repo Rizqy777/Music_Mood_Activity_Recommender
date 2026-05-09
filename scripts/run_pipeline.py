@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-metadata", action="store_true", help="Skip MongoDB/RDS metadata registration.")
     parser.add_argument("--skip-gold", action="store_true", help="Skip Gold transformations.")
     parser.add_argument(
+        "--run-gold",
+        action="store_true",
+        help="Run Gold transformations (by default they are skipped).",
+    )
+    parser.add_argument(
         "--clean-bronze",
         action="store_true",
         help="Delete existing Bronze files before consuming Kafka events for this run.",
@@ -90,9 +95,10 @@ def main() -> None:
         with stage_log("silver", "Running Bronze to Silver transformations"):
             silver_outputs = pipeline["run_bronze_to_silver"](settings, spark)
             LOGGER.info("Silver outputs: %s", silver_outputs)
-        if args.skip_gold:
+        run_gold = args.run_gold and not args.skip_gold
+        if not run_gold:
             gold_outputs: dict[str, Path] = {}
-            LOGGER.info("Skipping Silver to Gold transformations (--skip-gold)")
+            LOGGER.info("Skipping Silver to Gold transformations (use --run-gold to enable)")
         else:
             with stage_log("gold", "Running Silver to Gold transformations"):
                 gold_outputs = pipeline["run_silver_to_gold"](settings, spark)

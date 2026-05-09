@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import boto3
 import joblib
 import numpy as np
 import pandas as pd
@@ -20,6 +22,8 @@ from sklearn.preprocessing import StandardScaler
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from src.config import load_settings
 
 LOGGER = logging.getLogger("build_recommender")
 
@@ -113,15 +117,27 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "models",
         help="Carpeta donde guardar el recomendador.",
     )
+    parser.add_argument(
+        "--source",
+        choices=["auto", "s3", "local"],
+        default="auto",
+        help="Origen de Gold. Auto intenta S3 y usa copia local si falla.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args()
+    settings = load_settings()
+
+    tracks_prepared_path, metadata_path, source_used = resolve_tracks_paths(args.source, settings)
+    LOGGER.info("Usando tracks Gold desde %s", source_used)
+    LOGGER.info("Tracks prepared: %s", tracks_prepared_path)
+    LOGGER.info("Tracks metadata: %s", metadata_path)
 
     mood_model = joblib.load(args.mood_model)
-    tracks = load_tracks_catalog()
+    tracks = load_tracks_catalog(tracks_prepared_path, metadata_path)
     classified_tracks = classify_tracks(tracks, mood_model)
 
     output_data_dir = ROOT / "data_lake" / "recommender"
@@ -199,15 +215,61 @@ def main() -> None:
     print("Metricas:", json.dumps(metrics, indent=2))
 
 
-def load_tracks_catalog() -> pd.DataFrame:
-    scaled_path = ROOT / "data_lake" / "tmp_gold" / "tracks_prepared" / "full"
-    metadata_path = ROOT / "data_lake" / "gold" / "tracks_dataset"
-    if not scaled_path.exists():
-        raise FileNotFoundError(f"No existe {scaled_path}")
-    if not metadata_path.exists():
-        raise FileNotFoundError(f"No existe {metadata_path}")
+def download_s3_prefix(settings: Any, prefix: str, target_dir: Path) -> None:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-    scaled = pd.read_parquet(scaled_path)
+    client = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        endpoint_url=settings.s3_endpoint_url,
+    )
+    paginator = client.get_paginator("list_objects_v2")
+    found = False
+    for page in paginator.paginate(Bucket=settings.bucket_name, Prefix=prefix):
+        for item in page.get("Contents", []):
+            key = item["Key"]
+            if key.endswith("/"):
+                continue
+            found = True
+            relative = Path(key).relative_to(prefix.rstrip("/"))
+            destination = target_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            client.download_file(settings.bucket_name, key, str(destination))
+    if not found:
+        raise FileNotFoundError(f"No hay objetos en s3://{settings.bucket_name}/{prefix}")
+
+
+def resolve_tracks_paths(source: str, settings: Any) -> tuple[Path, Path, str]:
+    if source in {"s3", "auto"}:
+        try:
+            cache_dir = ROOT / "data_lake" / "s3_cache" / "gold"
+            tracks_prepared = cache_dir / "tracks_prepared" / "full"
+            tracks_metadata = cache_dir / "tracks_dataset"
+            download_s3_prefix(settings, "gold/tracks_prepared/full/", tracks_prepared)
+            download_s3_prefix(settings, "gold/tracks_dataset/", tracks_metadata)
+            return (
+                tracks_prepared,
+                tracks_metadata,
+                f"s3://{settings.bucket_name}/gold",
+            )
+        except Exception as exc:
+            if source == "s3":
+                raise
+            LOGGER.warning("No se pudo leer S3 (%s). Se usara copia local.", exc)
+
+    tracks_prepared = ROOT / "data_lake" / "tmp_gold" / "tracks_prepared" / "full"
+    tracks_metadata = ROOT / "data_lake" / "gold" / "tracks_dataset"
+    if not tracks_prepared.exists():
+        raise FileNotFoundError(f"No existe {tracks_prepared}")
+    if not tracks_metadata.exists():
+        raise FileNotFoundError(f"No existe {tracks_metadata}")
+    return tracks_prepared, tracks_metadata, str(ROOT / "data_lake")
+
+
+def load_tracks_catalog(tracks_prepared_path: Path, metadata_path: Path) -> pd.DataFrame:
+    scaled = pd.read_parquet(tracks_prepared_path)
     metadata = pd.read_parquet(metadata_path)
     metadata_cols = [
         col

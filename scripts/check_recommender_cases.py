@@ -22,7 +22,9 @@ def main() -> None:
         ("energico", "voy a estudiar", "energetic", "estudio_trabajo"),
         ("energico", "voy a correr", "energetic", "correr"),
         ("tranquilo", "quiero dormir", "calm", "dormir"),
+        ("tranquilo", "quiero bailar", "calm", "baile_fiesta"),
         ("tranquilo", "quiero reflexionar", "calm", "relajacion"),
+        ("tranquilo", "quiero", "calm", "actividad_general"),
     ]
     for mood, activity, expected_target, expected_activity in cases:
         result = recommender.recommend(mood, activity, 5)

@@ -19,6 +19,20 @@ ACTIVITY_PROFILE_COLS = [
 ]
 
 ACTIVITY_PROFILE_INDEX = {name: idx for idx, name in enumerate(ACTIVITY_PROFILE_COLS)}
+GENERIC_INTENT_WORDS = {
+    "quiero",
+    "necesito",
+    "me",
+    "apetece",
+    "hacer",
+    "algo",
+    "plan",
+    "planes",
+    "un",
+    "una",
+    "que",
+    "nada",
+}
 
 ACTIVITY_PROTOTYPES = {
     "desahogo_emocional": [0.00, 0.05, 0.05, 0.30, 0.95, 0.85],
@@ -47,6 +61,10 @@ TRAINING_PHRASES = {
         "me apetece una cancion triste",
         "quiero algo melancolico",
         "necesito procesar lo que siento",
+        "estoy triste y quiero llorar",
+        "quiero llorar tranquilo",
+        "necesito soltar todo",
+        "quiero desahogarme un rato",
     ],
     "entrenamiento_intenso": [
         "voy al gym",
@@ -59,6 +77,10 @@ TRAINING_PHRASES = {
         "entrenar piernas",
         "hacer cardio fuerte",
         "levantar pesas",
+        "hacer deporte",
+        "entrenar fuerte",
+        "tengo entrenamiento",
+        "voy a hacer ejercicio",
     ],
     "correr": [
         "salir a correr",
@@ -79,6 +101,11 @@ TRAINING_PHRASES = {
         "perrear",
         "hacer una fiesta con amigos",
         "bailar mientras cocino",
+        "quiero cantar",
+        "cantar en casa",
+        "reir con amigos",
+        "divertirme",
+        "poner musica para animarme",
     ],
     "limpieza_domestica": [
         "limpiar la casa",
@@ -93,6 +120,8 @@ TRAINING_PHRASES = {
         "quitar el polvo",
         "limpiar la cocina",
         "recoger la habitacion",
+        "cocinar",
+        "preparar la comida",
     ],
     "estudio_trabajo": [
         "estudiar",
@@ -110,6 +139,8 @@ TRAINING_PHRASES = {
         "hacer una presentacion",
         "tengo reunion de trabajo",
         "resolver ejercicios",
+        "quiero pensar con calma",
+        "estoy en modo concentracion",
     ],
     "alimentacion": [
         "voy a comer",
@@ -121,6 +152,9 @@ TRAINING_PHRASES = {
         "parar a comer",
         "comida rapida",
         "tomar un snack",
+        "tomar algo",
+        "beber algo",
+        "hacer una pausa para comer",
     ],
     "relajacion": [
         "relajarme",
@@ -137,6 +171,9 @@ TRAINING_PHRASES = {
         "hacer introspeccion",
         "contemplar",
         "estar en silencio",
+        "desestresarme",
+        "bajar el estres",
+        "calmarme",
     ],
     "dormir": [
         "dormir",
@@ -155,6 +192,8 @@ TRAINING_PHRASES = {
         "caminar tranquilo",
         "pasear por el parque",
         "salir a andar",
+        "ir a pasear",
+        "dar una vuelta",
     ],
     "conducir_viaje": [
         "conducir",
@@ -173,6 +212,12 @@ TRAINING_PHRASES = {
         "estar en casa",
         "hacer planes",
         "salir un rato",
+        "jugar",
+        "jugar videojuegos",
+        "quiero reir",
+        "quiero distraerme",
+        "quiero pelear",
+        "pelear",
     ],
 }
 
@@ -186,6 +231,9 @@ KEYWORD_ACTIVITY_HINTS = {
     "running": "correr",
     "bail": "baile_fiesta",
     "fiesta": "baile_fiesta",
+    "cantar": "baile_fiesta",
+    "reir": "baile_fiesta",
+    "divert": "baile_fiesta",
     "limpiar": "limpieza_domestica",
     "fregar": "limpieza_domestica",
     "barrer": "limpieza_domestica",
@@ -198,6 +246,8 @@ KEYWORD_ACTIVITY_HINTS = {
     "leer": "estudio_trabajo",
     "reunion": "estudio_trabajo",
     "comer": "alimentacion",
+    "beber": "alimentacion",
+    "tomar": "alimentacion",
     "almorz": "alimentacion",
     "cenar": "alimentacion",
     "desayun": "alimentacion",
@@ -210,10 +260,18 @@ KEYWORD_ACTIVITY_HINTS = {
     "pensar": "relajacion",
     "contempl": "relajacion",
     "introspec": "relajacion",
+    "calmar": "relajacion",
+    "desestres": "relajacion",
+    "estres": "relajacion",
     "pase": "caminar_paseo",
     "caminar": "caminar_paseo",
+    "pasear": "caminar_paseo",
+    "vuelta": "caminar_paseo",
     "conduc": "conducir_viaje",
     "viaj": "conducir_viaje",
+    "jugar": "actividad_general",
+    "videoj": "actividad_general",
+    "pelear": "actividad_general",
 }
 
 KEYWORD_PROFILE_DELTAS = {
@@ -246,6 +304,21 @@ KEYWORD_PROFILE_DELTAS = {
         "activity_movement": 0.40,
         "activity_positivity": 0.45,
     },
+    "cantar": {
+        "activity_energy": 0.25,
+        "activity_movement": 0.25,
+        "activity_positivity": 0.30,
+    },
+    "reir": {
+        "activity_energy": 0.20,
+        "activity_movement": 0.20,
+        "activity_positivity": 0.35,
+    },
+    "divert": {
+        "activity_energy": 0.20,
+        "activity_movement": 0.20,
+        "activity_positivity": 0.35,
+    },
     "limpiar": {"activity_energy": 0.25, "activity_movement": 0.35},
     "fregar": {"activity_energy": 0.25, "activity_movement": 0.35},
     "barrer": {"activity_energy": 0.20, "activity_movement": 0.30},
@@ -258,6 +331,8 @@ KEYWORD_PROFILE_DELTAS = {
     "leer": {"activity_focus": 0.45, "activity_calm": 0.25, "activity_movement": -0.20},
     "reunion": {"activity_focus": 0.35, "activity_calm": 0.15, "activity_movement": -0.10},
     "comer": {"activity_energy": -0.20, "activity_movement": -0.20, "activity_calm": 0.30},
+    "beber": {"activity_energy": -0.10, "activity_movement": -0.10, "activity_calm": 0.20},
+    "tomar": {"activity_energy": -0.10, "activity_movement": -0.10, "activity_calm": 0.20},
     "almorz": {"activity_energy": -0.15, "activity_movement": -0.15, "activity_calm": 0.25},
     "cenar": {"activity_energy": -0.20, "activity_movement": -0.20, "activity_calm": 0.30},
     "desayun": {"activity_energy": -0.15, "activity_movement": -0.15, "activity_calm": 0.20},
@@ -292,10 +367,17 @@ KEYWORD_PROFILE_DELTAS = {
         "activity_calm": 0.45,
         "activity_acoustic": 0.20,
     },
+    "calmar": {"activity_energy": -0.30, "activity_movement": -0.25, "activity_calm": 0.45},
+    "desestres": {"activity_energy": -0.35, "activity_movement": -0.30, "activity_calm": 0.50},
+    "estres": {"activity_energy": -0.25, "activity_movement": -0.20, "activity_calm": 0.35},
     "pase": {"activity_energy": -0.05, "activity_movement": 0.20, "activity_calm": 0.20},
     "caminar": {"activity_energy": -0.05, "activity_movement": 0.20, "activity_calm": 0.20},
+    "pasear": {"activity_energy": -0.05, "activity_movement": 0.20, "activity_calm": 0.20},
+    "vuelta": {"activity_energy": -0.05, "activity_movement": 0.15, "activity_calm": 0.20},
     "conduc": {"activity_focus": 0.20, "activity_movement": 0.20},
     "viaj": {"activity_focus": 0.15, "activity_movement": 0.20, "activity_positivity": 0.15},
+    "jugar": {"activity_energy": 0.15, "activity_movement": 0.15, "activity_focus": 0.15},
+    "videoj": {"activity_energy": 0.15, "activity_movement": 0.10, "activity_focus": 0.20},
 }
 
 
@@ -306,6 +388,8 @@ class ActivityTextInterpreter:
 
     def predict_profile(self, text: str) -> dict[str, float | str]:
         clean_text = normalize_text(text)
+        if is_generic_input(clean_text):
+            return generic_profile()
         if self.model is None:
             return fallback_profile(clean_text)
 
@@ -334,6 +418,17 @@ def normalize_text(text: str) -> str:
     value = value.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
     value = value.replace("ü", "u").replace("ñ", "n")
     return re.sub(r"\s+", " ", value)
+
+
+def is_generic_input(text: str) -> bool:
+    tokens = [token for token in text.split() if token]
+    if not tokens:
+        return True
+    if all(token in GENERIC_INTENT_WORDS for token in tokens):
+        return True
+    if len(tokens) <= 2 and not keyword_hint_activity(text):
+        return True
+    return False
 
 
 def nearest_activity_name(values: np.ndarray) -> str:
@@ -378,4 +473,11 @@ def fallback_profile(text: str) -> dict[str, float | str]:
     hint_name = keyword_hint_activity(text)
     profile = dict(zip(ACTIVITY_PROFILE_COLS, scores.clip(0.0, 1.0).tolist()))
     profile["activity_name"] = hint_name or nearest_activity_name(scores)
+    return profile
+
+
+def generic_profile() -> dict[str, float | str]:
+    scores = np.asarray(ACTIVITY_PROTOTYPES["actividad_general"], dtype=float)
+    profile = dict(zip(ACTIVITY_PROFILE_COLS, scores.clip(0.0, 1.0).tolist()))
+    profile["activity_name"] = "actividad_general"
     return profile

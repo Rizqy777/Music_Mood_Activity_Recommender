@@ -1,0 +1,28 @@
+The Spotify datasets that I usually see here in Kaggle are almost always Songs and Attributes only, with no lyric data. So I downloaded some of the largest Spotify datasets here in Kaggle and fed all the songs to the Spotify lyrics API.
+
+For all those songs with returned lyrics, I compiled them as one dataset.
+
+Supplementary Dataset
+🎹 960K Spotify Songs Lyrics Embeddings 🔢- embeddings of lyrics data using multilingual embedding modeĺ BAAI/bge-m3
+Source Datasets
+160k Spotify songs from 1921 to 2020 by @fcpercival
+30000 Spotify Songs by @joebeachcapital
+6K Spotify Playlists by @viktoriiashkurenko
+Spotify 1.2M+ Songs by @rodolfofigueroa
+Spotify and Genius Track Dataset by @saurabhshahane
+Spotify Tracks DB by @zaheenhamidani
+Spotify Tracks Genre by @thedevastator
+Spotify_1Million_Tracks by @amitanshjoshi
+Top Spotify Songs in 73 Countries (Daily Updated) by @asaniczka
+Full credits and citations to all the creators of the awesome datasets above, this dataset is a supplementary and enriched version of these datasets.
+
+Important Notes
+Not all songs have available lyrics
+Not all source datasets have Album data
+Not all songs that have lyrics have properly annotated startTimeMs values
+I submitted 3.3M unique songs to the Lyrics API and only 960K songs have lyrics
+Upvoting
+If you'd upvote and utilize this dataset, PLEASE upvote the datasets above as well!
+
+Image
+Created with Bing Image Creator
