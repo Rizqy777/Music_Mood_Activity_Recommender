@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import shutil
 
@@ -36,12 +37,25 @@ TRACK_AUDIO_FEATURES = [
     "tempo",
 ]
 
+LYRICS_AUDIO_FEATURES = [
+    *UNIT_INTERVAL_FEATURES,
+    "loudness",
+    "tempo",
+]
+
 MOOD_LABELS = {
     0: "sad",
     1: "happy",
     2: "energetic",
     3: "calm",
 }
+
+
+def _safe_cast_numeric(column: str, target_type: str) -> F.Column:
+    base = F.expr(f"try_cast(`{column}` as double)")
+    if target_type == "double":
+        return base
+    return base.cast(target_type)
 
 
 def run_bronze_to_silver(settings: Settings, spark: SparkSession | None = None) -> dict[str, Path]:
@@ -59,6 +73,11 @@ def run_bronze_to_silver(settings: Settings, spark: SparkSession | None = None) 
             _clean_tracks(_read_bronze(spark, settings, "tracks_dataset")),
             writer,
             "tracks_dataset",
+        ),
+        "lyrics_dataset": _write_silver(
+            _clean_lyrics(_read_bronze(spark, settings, "lyrics_dataset")),
+            writer,
+            "lyrics_dataset",
         ),
     }
     if own_session:
@@ -82,6 +101,11 @@ def run_silver_to_gold(settings: Settings, spark: SparkSession | None = None) ->
             _prepare_gold_tracks(_read_layer(spark, settings, "silver", "tracks_dataset")),
             writer,
             "tracks_dataset",
+        ),
+        "lyrics_dataset": _write_gold(
+            _prepare_gold_lyrics(_read_layer(spark, settings, "silver", "lyrics_dataset")),
+            writer,
+            "lyrics_dataset",
         ),
     }
     if own_session:
@@ -116,9 +140,9 @@ def _clean_mood(df: DataFrame) -> DataFrame:
     )
     for column in MOOD_AUDIO_FEATURES:
         if column in cleaned.columns:
-            cleaned = cleaned.withColumn(column, F.col(column).cast("double"))
-    cleaned = cleaned.withColumn("duration_ms", F.col("duration_ms").cast("long"))
-    cleaned = cleaned.withColumn("mood_label", F.col("mood_label").cast("int"))
+            cleaned = cleaned.withColumn(column, _safe_cast_numeric(column, "double"))
+    cleaned = cleaned.withColumn("duration_ms", _safe_cast_numeric("duration_ms", "long"))
+    cleaned = cleaned.withColumn("mood_label", _safe_cast_numeric("mood_label", "int"))
     cleaned = _fill_nulls(cleaned, text_columns=["uri"], numeric_columns=["duration_ms", "mood_label", *MOOD_AUDIO_FEATURES])
     cleaned = cleaned.dropna(subset=["uri"]).dropDuplicates(["uri"])
     cleaned = _filter_audio_ranges(cleaned)
@@ -131,13 +155,33 @@ def _clean_tracks(df: DataFrame) -> DataFrame:
     for column in numeric_columns:
         if column in cleaned.columns:
             target_type = "double" if column in TRACK_AUDIO_FEATURES else "int"
-            cleaned = cleaned.withColumn(column, F.col(column).cast(target_type))
+            cleaned = cleaned.withColumn(column, _safe_cast_numeric(column, target_type))
     cleaned = cleaned.withColumn("explicit", F.col("explicit").cast("boolean"))
     text_columns = ["track_id", "artists", "album_name", "track_name", "track_genre"]
     for column in text_columns:
         cleaned = cleaned.withColumn(column, F.trim(F.regexp_replace(F.col(column).cast("string"), r"\s+", " ")))
     cleaned = _fill_nulls(cleaned, text_columns=text_columns, numeric_columns=numeric_columns)
     cleaned = cleaned.fillna({"explicit": False})
+    cleaned = cleaned.dropna(subset=["track_id"]).dropDuplicates(["track_id"])
+    cleaned = _filter_audio_ranges(cleaned)
+    return cleaned
+
+
+def _clean_lyrics(df: DataFrame) -> DataFrame:
+    cleaned = (
+        df.withColumnRenamed("id", "track_id")
+        .withColumnRenamed("name", "track_name")
+    )
+    numeric_columns = ["duration_ms", "key", "mode", *LYRICS_AUDIO_FEATURES]
+    for column in numeric_columns:
+        if column in cleaned.columns:
+            target_type = "double" if column in LYRICS_AUDIO_FEATURES else "int"
+            cleaned = cleaned.withColumn(column, _safe_cast_numeric(column, target_type))
+    text_columns = ["track_id", "track_name", "artists", "album_name", "lyrics"]
+    for column in text_columns:
+        if column in cleaned.columns:
+            cleaned = cleaned.withColumn(column, F.trim(F.regexp_replace(F.col(column).cast("string"), r"\s+", " ")))
+    cleaned = _fill_nulls(cleaned, text_columns=text_columns, numeric_columns=numeric_columns)
     cleaned = cleaned.dropna(subset=["track_id"]).dropDuplicates(["track_id"])
     cleaned = _filter_audio_ranges(cleaned)
     return cleaned
@@ -177,6 +221,19 @@ def _prepare_gold_tracks(df: DataFrame) -> DataFrame:
     )
 
 
+def _prepare_gold_lyrics(df: DataFrame) -> DataFrame:
+    base = df.withColumn("track_genre", F.lit("spotify_unknown")).withColumn("popularity", F.lit(0))
+    base = base.withColumn("explicit", F.lit(False))
+    return (
+        base.withColumn(
+            "lyrics_word_count",
+            F.size(F.split(F.trim(F.coalesce(F.col("lyrics"), F.lit(""))), r"\s+")),
+        )
+        .withColumn("lyrics_length", F.length(F.coalesce(F.col("lyrics"), F.lit(""))))
+        .withColumn("has_lyrics", (F.col("lyrics_length") > 0).cast("int"))
+    )
+
+
 def _fill_nulls(df: DataFrame, text_columns: list[str], numeric_columns: list[str]) -> DataFrame:
     text_defaults = {column: "unknown" for column in text_columns if column in df.columns}
     numeric_defaults = {column: 0 for column in numeric_columns if column in df.columns}
@@ -209,9 +266,17 @@ def _write_layer(df: DataFrame, writer: LakeWriter, layer: str, dataset: str) ->
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True, exist_ok=True)
-    row_count = df.count()
-    LOGGER.info("Writing %s rows to %s layer for %s at %s", row_count, layer, dataset, target)
-    df.write.mode("overwrite").parquet(target.as_uri())
+    log_rows = os.getenv("SPARK_LOG_ROW_COUNTS", "false").strip().lower() in {"1", "true", "yes", "y"}
+    row_count = df.count() if log_rows else None
+    if row_count is None:
+        LOGGER.info("Writing %s layer for %s at %s", layer, dataset, target)
+    else:
+        LOGGER.info("Writing %s rows to %s layer for %s at %s", row_count, layer, dataset, target)
+    writer_options = {}
+    max_records = os.getenv("SPARK_MAX_RECORDS_PER_FILE", "").strip()
+    if max_records:
+        writer_options["maxRecordsPerFile"] = max_records
+    df.write.mode("overwrite").options(**writer_options).parquet(target.as_uri())
     writer.mirror_directory_to_s3(layer, dataset)
     LOGGER.info("Finished writing %s/%s at %s", layer, dataset, target)
     return target

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.activity_text_model import ActivityTextInterpreter
@@ -60,16 +63,34 @@ class MusicActivityRecommender:
         model_path: Path | None = None,
         catalog_path: Path | None = None,
     ) -> None:
-        self.model_path = model_path or ROOT / "models" / "activity_recommender_mlp.joblib"
+        default_best_path = ROOT / "models" / "activity_recommender_best.joblib"
+        self.model_path = model_path or (
+            default_best_path
+            if default_best_path.exists()
+            else ROOT / "models" / "activity_recommender_mlp.joblib"
+        )
         self.catalog_path = catalog_path or ROOT / "data_lake" / "recommender" / "classified_tracks.parquet"
         self.model = joblib.load(self.model_path)
         self.catalog = pd.read_parquet(self.catalog_path)
+        self._catalog_mtime = self.catalog_path.stat().st_mtime if self.catalog_path.exists() else None
         self.activity_interpreter = ActivityTextInterpreter()
 
-    def recommend(self, user_mood: str, activity_text: str, top_k: int = 5) -> pd.DataFrame:
+    def recommend(
+        self,
+        user_mood: str,
+        activity_text: str,
+        top_k: int = 5,
+        artist_filter: str | None = None,
+        genre_filter: str | None = None,
+    ) -> pd.DataFrame:
+        self.reload_catalog_if_changed()
         mood = normalize_mood(user_mood)
         activity_profile = self.activity_interpreter.predict_profile(activity_text)
-        scored = self.catalog.copy()
+        catalog = filter_catalog_by_artist(self.catalog, artist_filter)
+        catalog = filter_catalog_by_genre(catalog, genre_filter)
+        scored = catalog.copy()
+        if scored.empty:
+            return scored.head(0)
         for known_mood in MOOD_TO_LABEL:
             scored[f"user_mood_{known_mood}"] = 1.0 if known_mood == mood else 0.0
         for col, value in activity_profile.items():
@@ -77,37 +98,35 @@ class MusicActivityRecommender:
         proba_cols = ["proba_sad", "proba_happy", "proba_energetic", "proba_calm"]
         if all(col in scored.columns for col in proba_cols):
             effective_proba = scored[proba_cols].copy()
-            calm_signal = (
-                0.55 * (1.0 - scored["energy"].clip(0.0, 1.0))
-                + 0.25 * scored["acousticness"].clip(0.0, 1.0)
-                + 0.20 * (1.0 - scored["danceability"].clip(0.0, 1.0))
-            ).clip(0.0, 1.0)
-            effective_proba["proba_calm"] = (0.60 * scored["proba_calm"] + 0.40 * calm_signal).clip(0.0, 1.0)
+            calm_signal = build_calm_signal(scored)
+            effective_proba["proba_calm"] = np.maximum(scored["proba_calm"].fillna(0.0), calm_signal)
             scored["predicted_mood"] = effective_proba.idxmax(axis=1).str.replace("proba_", "")
         scored["recommendation_score_nn"] = self.model.predict(scored[MODEL_INPUT_COLS]).clip(0.0, 1.0)
         scored["context_score"] = contextual_score(scored, mood, activity_profile)
         mood_probability_col = f"proba_{mood}"
         if mood == "calm" and all(col in scored.columns for col in proba_cols):
-            calm_signal = (
-                0.55 * (1.0 - scored["energy"].clip(0.0, 1.0))
-                + 0.25 * scored["acousticness"].clip(0.0, 1.0)
-                + 0.20 * (1.0 - scored["danceability"].clip(0.0, 1.0))
-            ).clip(0.0, 1.0)
-            scored["user_mood_probability"] = (0.60 * scored["proba_calm"] + 0.40 * calm_signal).clip(0.0, 1.0)
+            calm_signal = build_calm_signal(scored)
+            scored["user_mood_probability"] = np.maximum(scored["proba_calm"].fillna(0.0), calm_signal)
         else:
             scored["user_mood_probability"] = scored[mood_probability_col]
+        if f"lyrics_proba_{mood}" in scored.columns:
+            scored["lyrics_semantic_score"] = scored[f"lyrics_proba_{mood}"].fillna(0.0).clip(0.0, 1.0)
+        else:
+            scored["lyrics_semantic_score"] = 0.0
         popularity = scored["popularity"].fillna(0).clip(0, 100) / 100 if "popularity" in scored else 0.0
         scored["recommendation_score"] = (
-            0.58 * scored["context_score"]
-            + 0.27 * scored["user_mood_probability"]
+            0.53 * scored["context_score"]
+            + 0.25 * scored["user_mood_probability"]
             + 0.10 * scored["recommendation_score_nn"]
+            + 0.07 * scored["lyrics_semantic_score"]
             + 0.05 * popularity
         ).clip(0.0, 1.0)
         if mood in {"calm", "sad"}:
             scored["recommendation_score"] = (
-                0.55 * scored["context_score"]
-                + 0.30 * scored["user_mood_probability"]
+                0.50 * scored["context_score"]
+                + 0.29 * scored["user_mood_probability"]
                 + 0.10 * scored["recommendation_score_nn"]
+                + 0.06 * scored["lyrics_semantic_score"]
                 + 0.05 * popularity
             ).clip(0.0, 1.0)
             if mood == "calm":
@@ -140,10 +159,94 @@ class MusicActivityRecommender:
             "reason",
             "spotify_url",
             "track_id",
+            "audio_predicted_mood",
+            "lyrics_predicted_mood",
+            "mood_contrast",
         ]
         available = [col for col in columns if col in scored.columns]
         result = scored.sort_values("recommendation_score", ascending=False).head(top_k)[available].copy()
         return result
+
+    def reload_catalog_if_changed(self) -> None:
+        if not self.catalog_path.exists():
+            return
+        current_mtime = self.catalog_path.stat().st_mtime
+        if self._catalog_mtime is None or current_mtime > self._catalog_mtime:
+            self.catalog = pd.read_parquet(self.catalog_path)
+            self._catalog_mtime = current_mtime
+
+
+def normalize_artist_text(value: str) -> str:
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def split_artist_queries(query: str) -> list[str]:
+    parts = re.split(r"[,;/]+", str(query))
+    return [normalized for part in parts if (normalized := normalize_artist_text(part))]
+
+
+def artist_matches(query: str, artist_value: str) -> bool:
+    if artist_value is None or (isinstance(artist_value, float) and pd.isna(artist_value)):
+        return False
+    candidates = re.split(r"[,/&]+", str(artist_value))
+    candidates.append(str(artist_value))
+    for candidate in candidates:
+        normalized = normalize_artist_text(candidate)
+        if not normalized:
+            continue
+        if query in normalized:
+            return True
+    return False
+
+
+def filter_catalog_by_artist(
+    catalog: pd.DataFrame,
+    artist_query: str | None,
+) -> pd.DataFrame:
+    if catalog is None or catalog.empty:
+        return catalog
+    if not artist_query or not str(artist_query).strip():
+        return catalog
+    if "artists" not in catalog.columns:
+        return catalog
+    queries = split_artist_queries(artist_query)
+    if not queries:
+        return catalog
+
+    def matches(artist_value: str) -> bool:
+        return any(artist_matches(query, artist_value) for query in queries)
+
+    mask = catalog["artists"].apply(matches)
+    return catalog[mask].copy()
+
+
+def normalize_genre_filter(value: str | None) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    if text in {"", "todos", "todas", "all", "none"}:
+        return ""
+    return text
+
+
+def filter_catalog_by_genre(
+    catalog: pd.DataFrame,
+    genre_filter: str | None,
+) -> pd.DataFrame:
+    if catalog is None or catalog.empty:
+        return catalog
+    if "track_genre" not in catalog.columns:
+        return catalog
+    normalized = normalize_genre_filter(genre_filter)
+    if not normalized:
+        return catalog
+    mask = catalog["track_genre"].astype(str).str.lower().eq(normalized)
+    return catalog[mask].copy()
 
 
 def normalize_mood(user_mood: str) -> str:
@@ -234,6 +337,37 @@ def closeness(series: pd.Series, target: float) -> pd.Series:
 def normalized_abs(series: pd.Series) -> pd.Series:
     max_abs = max(float(series.abs().max()), 1.0)
     return (series.abs() / max_abs).clip(0.0, 1.0)
+
+
+def build_calm_signal(frame: pd.DataFrame) -> pd.Series:
+    index = frame.index
+
+    def feature(name: str, default: float = 0.0) -> pd.Series:
+        if name not in frame.columns:
+            return pd.Series(default, index=index, dtype=float)
+        return pd.to_numeric(frame[name], errors="coerce").fillna(default)
+
+    def sigmoid(values: pd.Series) -> pd.Series:
+        clipped = values.clip(-20.0, 20.0)
+        return 1.0 / (1.0 + np.exp(-clipped))
+
+    low_energy = sigmoid((-feature("energy") - 0.25) * 2.0)
+    high_acoustic = sigmoid((feature("acousticness") - 0.10) * 1.8)
+    low_loudness = sigmoid((-feature("loudness") - 0.20) * 1.5)
+    low_danceability = sigmoid((-feature("danceability") - 0.15) * 1.3)
+    low_speechiness = sigmoid((-feature("speechiness") - 0.10) * 1.2)
+    instrumental = sigmoid((feature("instrumentalness") - 0.30) * 1.8)
+    lyrics_calm = feature("lyrics_proba_calm").clip(0.0, 1.0)
+
+    return (
+        0.25 * low_energy
+        + 0.22 * high_acoustic
+        + 0.18 * low_loudness
+        + 0.12 * low_danceability
+        + 0.08 * low_speechiness
+        + 0.05 * instrumental
+        + 0.10 * lyrics_calm
+    ).clip(0.0, 1.0)
 
 
 def build_reason(user_mood: str, activity_name: str) -> str:

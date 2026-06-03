@@ -3,17 +3,142 @@ from __future__ import annotations
 import base64
 import html
 import random
+import secrets
 from pathlib import Path
 
 import gradio as gr
 
-from src.recommender import MusicActivityRecommender
+from src.recommender import MusicActivityRecommender, normalize_mood
 
 RECOMMENDER = MusicActivityRecommender()
 ROOT = Path(__file__).resolve().parent
 POOL_MULTIPLIER = 30
 MIN_POOL_SIZE = 50
 MAX_POOL_SIZE = 1000
+SCORE_RANGES = {
+    "0.00 - 1.00": (0.0, 1.01),
+    "0.75 - 1.00": (0.75, 1.01),
+    "0.60 - 0.75": (0.60, 0.75),
+    "0.45 - 0.60": (0.45, 0.60),
+}
+GENRE_CHOICES = [
+    "Todos",
+    "acoustic",
+    "afrobeat",
+    "alt-rock",
+    "alternative",
+    "ambient",
+    "anime",
+    "black-metal",
+    "bluegrass",
+    "blues",
+    "brazil",
+    "breakbeat",
+    "british",
+    "cantopop",
+    "chicago-house",
+    "children",
+    "chill",
+    "classical",
+    "club",
+    "comedy",
+    "country",
+    "dance",
+    "dancehall",
+    "death-metal",
+    "deep-house",
+    "detroit-techno",
+    "disco",
+    "disney",
+    "drum-and-bass",
+    "dub",
+    "dubstep",
+    "edm",
+    "electro",
+    "electronic",
+    "emo",
+    "folk",
+    "forro",
+    "french",
+    "funk",
+    "garage",
+    "german",
+    "gospel",
+    "goth",
+    "grindcore",
+    "groove",
+    "grunge",
+    "guitar",
+    "happy",
+    "hard-rock",
+    "hardcore",
+    "hardstyle",
+    "heavy-metal",
+    "hip-hop",
+    "honky-tonk",
+    "house",
+    "idm",
+    "indian",
+    "indie-pop",
+    "indie",
+    "industrial",
+    "iranian",
+    "j-dance",
+    "j-idol",
+    "j-pop",
+    "j-rock",
+    "jazz",
+    "k-pop",
+    "kids",
+    "latin",
+    "latino",
+    "malay",
+    "mandopop",
+    "metal",
+    "metalcore",
+    "minimal-techno",
+    "mpb",
+    "new-age",
+    "opera",
+    "pagode",
+    "party",
+    "piano",
+    "pop-film",
+    "pop",
+    "power-pop",
+    "progressive-house",
+    "psych-rock",
+    "punk-rock",
+    "punk",
+    "r-n-b",
+    "reggae",
+    "reggaeton",
+    "rock-n-roll",
+    "rock",
+    "rockabilly",
+    "romance",
+    "sad",
+    "salsa",
+    "samba",
+    "sertanejo",
+    "show-tunes",
+    "singer-songwriter",
+    "ska",
+    "sleep",
+    "songwriter",
+    "soul",
+    "spanish",
+    "study",
+    "swedish",
+    "synth-pop",
+    "tango",
+    "techno",
+    "trance",
+    "trip-hop",
+    "turkish",
+    "world-music",
+    "spotify_unknown",
+]
 
 
 def load_banner_data() -> str:
@@ -28,16 +153,41 @@ BANNER_DATA = load_banner_data()
 
 
 def sample_recommendations(pool, top_k: int, seed: int):
-  if pool is None or pool.empty:
-    return pool
-  rng = random.Random(seed)
-  indices = list(pool.index)
-  rng.shuffle(indices)
-  selected = pool.loc[indices[:top_k]].copy()
-  return selected.reset_index(drop=True)
+    if pool is None or pool.empty:
+        return pool
+    rng = random.Random(seed)
+    indices = list(pool.index)
+    rng.shuffle(indices)
+    selected = pool.loc[indices[:top_k]].copy()
+    return selected.reset_index(drop=True)
+
+
+def filter_by_score_range(pool, score_range: str):
+    if pool is None or len(pool) == 0:
+        return pool
+    if "recommendation_score" not in pool.columns:
+        return pool
+    min_score, max_score = SCORE_RANGES.get(score_range, SCORE_RANGES["0.00 - 1.00"])
+    filtered = pool[
+        (pool["recommendation_score"].astype(float) >= min_score)
+        & (pool["recommendation_score"].astype(float) < max_score)
+    ].copy()
+    return filtered
+
+
+def filter_by_mood_match(pool, user_mood: str):
+    if pool is None or len(pool) == 0:
+        return pool
+    if "predicted_mood" not in pool.columns:
+        return pool
+    normalized = normalize_mood(user_mood)
+    return pool[pool["predicted_mood"].astype(str).str.lower() == normalized].copy()
+
+
 
 
 def format_recommendations(recommendations):
+    recommendations = recommendations.copy()
     display_df = recommendations.rename(
         columns={
             "track_name": "Cancion",
@@ -52,6 +202,9 @@ def format_recommendations(recommendations):
             "reason": "Motivo",
             "spotify_url": "Spotify",
             "track_id": "Track ID",
+            "audio_predicted_mood": "Mood audio",
+            "lyrics_predicted_mood": "Mood letra",
+            "mood_contrast": "Contraste audio/letra",
         }
     )
     warning = None
@@ -82,27 +235,88 @@ def filter_unseen(pool, seen_ids):
     return pool[mask].copy()
 
 
-def build_pool(user_mood: str, activity: str, pool_size: int):
-    return RECOMMENDER.recommend(user_mood, activity, top_k=pool_size)
+def build_pool(user_mood: str, activity: str, pool_size: int, artist_filter: str, genre_filter: str):
+    return RECOMMENDER.recommend(
+        user_mood,
+        activity,
+        top_k=pool_size,
+        artist_filter=artist_filter,
+        genre_filter=genre_filter,
+    )
 
 
-def recommend(user_mood: str, activity: str, top_k: int):
-    recommendations = RECOMMENDER.recommend(user_mood, activity, top_k=int(top_k))
+def recommend(
+    user_mood: str,
+    activity: str,
+    artist_filter: str,
+    genre_filter: str,
+    top_k: int,
+    score_range: str,
+):
+    recommendations = RECOMMENDER.recommend(
+        user_mood,
+        activity,
+        top_k=int(top_k),
+        artist_filter=artist_filter,
+        genre_filter=genre_filter,
+    )
+    recommendations = filter_by_mood_match(recommendations, user_mood)
+    recommendations = filter_by_score_range(recommendations, score_range)
     return format_recommendations(recommendations)
 
 
-def recommend_with_pool(user_mood: str, activity: str, top_k: int):
+def recommend_with_pool(
+    user_mood: str,
+    activity: str,
+    artist_filter: str,
+    genre_filter: str,
+    top_k: int,
+    score_range: str,
+):
     top_k = int(top_k)
     pool_size = min(max(top_k * POOL_MULTIPLIER, MIN_POOL_SIZE), MAX_POOL_SIZE)
-    recommendations = build_pool(user_mood, activity, pool_size)
-    selected = sample_recommendations(recommendations, top_k, seed=0)
+    recommendations = build_pool(user_mood, activity, pool_size, artist_filter, genre_filter)
+    filtered = filter_by_mood_match(recommendations, user_mood)
+    filtered = filter_by_score_range(filtered, score_range)
+    seed = secrets.randbelow(2**31 - 1)
+    selected = sample_recommendations(filtered, top_k, seed=seed)
+    if selected is None or selected.empty:
+        message = (
+            "<div class='warning-pill'>"
+            "No hay canciones suficientes con esos filtros. Prueba otro rango o artista."
+            "</div>"
+        )
+        query_state = {
+            "mood": user_mood,
+            "activity": activity,
+            "artist_filter": artist_filter,
+            "genre_filter": genre_filter,
+            "score_range": score_range,
+        }
+        return message, None, recommendations, seed, [], pool_size, query_state
     cards_html, display_df = format_recommendations(selected)
     seen_ids = get_recommendation_ids(selected)
-    query_state = {"mood": user_mood, "activity": activity}
-    return cards_html, display_df, recommendations, 0, seen_ids, pool_size, query_state
+    query_state = {
+        "mood": user_mood,
+        "activity": activity,
+        "artist_filter": artist_filter,
+        "genre_filter": genre_filter,
+        "score_range": score_range,
+    }
+    return cards_html, display_df, recommendations, seed, seen_ids, pool_size, query_state
 
 
-def refresh_recommendations(top_k: int, pool, seed: int, seen_ids, pool_size: int, query_state):
+def refresh_recommendations(
+    top_k: int,
+    score_range: str,
+    artist_filter: str,
+    genre_filter: str,
+    pool,
+    seed: int,
+    seen_ids,
+    pool_size: int,
+    query_state,
+):
     if not query_state:
         return (
             "<div class='warning-pill'>Ejecuta una busqueda primero.</div>",
@@ -115,16 +329,31 @@ def refresh_recommendations(top_k: int, pool, seed: int, seen_ids, pool_size: in
         )
     seen_ids = seen_ids or []
     top_k = int(top_k)
-    available = filter_unseen(pool, seen_ids)
+    score_range = score_range or query_state.get("score_range", "0.00 - 1.00")
+    artist_filter = artist_filter or query_state.get("artist_filter", "")
+    genre_filter = genre_filter or query_state.get("genre_filter", "Todos")
+    available = filter_unseen(
+        filter_by_score_range(filter_by_mood_match(pool, query_state["mood"]), score_range),
+        seen_ids,
+    )
     if available is None or len(available) < top_k:
         next_pool_size = min(max(pool_size * 2, MIN_POOL_SIZE), MAX_POOL_SIZE)
         if next_pool_size > (pool_size or 0):
-            pool = build_pool(query_state["mood"], query_state["activity"], next_pool_size)
+            pool = build_pool(
+                query_state["mood"],
+                query_state["activity"],
+                next_pool_size,
+                artist_filter,
+                genre_filter,
+            )
             pool_size = next_pool_size
-            available = filter_unseen(pool, seen_ids)
+        available = filter_unseen(
+            filter_by_score_range(filter_by_mood_match(pool, query_state["mood"]), score_range),
+            seen_ids,
+        )
     if available is None or len(available) == 0:
         return (
-            "<div class='warning-pill'>No quedan opciones nuevas. Haz otra busqueda.</div>",
+            "<div class='warning-pill'>No quedan opciones nuevas en ese rango. Cambia el rango o haz otra busqueda.</div>",
             None,
             pool,
             seed,
@@ -132,7 +361,7 @@ def refresh_recommendations(top_k: int, pool, seed: int, seen_ids, pool_size: in
             pool_size,
             query_state,
         )
-    new_seed = int(seed) + 1
+    new_seed = secrets.randbelow(2**31 - 1)
     selected = sample_recommendations(available, top_k, seed=new_seed)
     cards_html, display_df = format_recommendations(selected)
     new_seen = [*seen_ids, *get_recommendation_ids(selected)]
@@ -142,8 +371,12 @@ def refresh_recommendations(top_k: int, pool, seed: int, seen_ids, pool_size: in
 def render_cards(recommendations, warning=None):
     cards = []
     for index, row in recommendations.iterrows():
-        score = float(row.get("Score", 0.0))
         confidence = float(row.get("Confianza mood", 0.0))
+        score_value = row.get("Score")
+        score_label = "Score"
+        score_display = "-"
+        if score_value is not None and str(score_value).lower() != "nan":
+            score_display = f"{float(score_value):.3f}"
         spotify_url = str(row.get("Spotify", ""))
         track_id = str(row.get("Track ID", "")).strip()
         spotify_link = ""
@@ -183,8 +416,8 @@ def render_cards(recommendations, warning=None):
                 {spotify_player}
               </div>
               <div class="score-box">
-                <strong>{score:.2f}</strong>
-                <span>score</span>
+                <strong>{html.escape(score_display)}</strong>
+                <span>{html.escape(score_label)}</span>
                 <small>{confidence:.2f} mood</small>
               </div>
             </article>
@@ -384,9 +617,11 @@ body, .gradio-container {
   padding-left: 14px;
 }
 .score-box strong {
-  font-size: 30px;
+  max-width: 96px;
+  font-size: 17px;
   line-height: 1;
   color: var(--accent-strong);
+  text-align: center;
 }
 .score-box span,
 .score-box small {
@@ -428,7 +663,25 @@ with gr.Blocks(title="Music Mood Activity Recommender") as demo:
                 placeholder="Ejemplo: quiero llorar, voy al gym, estudiar, limpiar la casa...",
                 scale=2,
             )
+            artist_filter = gr.Textbox(
+                value="",
+                label="Filtrar por artista (opcional)",
+                placeholder="Ejemplo: bad bunny, taylor swift...",
+                scale=1,
+            )
+            genre_filter = gr.Dropdown(
+                choices=GENRE_CHOICES,
+                value="Todos",
+                label="Filtrar por genero (opcional)",
+                scale=1,
+            )
             top_k = gr.Slider(1, 10, value=5, step=1, label="Numero de canciones", scale=1)
+            score_range = gr.Dropdown(
+                choices=list(SCORE_RANGES.keys()),
+                value="0.00 - 1.00",
+                label="Rango de recomendacion",
+                scale=1,
+            )
         button = gr.Button("Buscar canciones", elem_classes=["primary-button"])
         refresh = gr.Button("Refrescar opciones")
 
@@ -442,25 +695,25 @@ with gr.Blocks(title="Music Mood Activity Recommender") as demo:
     output = gr.Dataframe(label="Detalle tecnico", wrap=True)
     button.click(
         recommend_with_pool,
-        inputs=[mood, activity, top_k],
+        inputs=[mood, activity, artist_filter, genre_filter, top_k, score_range],
         outputs=[cards, output, pool_state, seed_state, seen_state, pool_size_state, query_state],
     )
     refresh.click(
         refresh_recommendations,
-        inputs=[top_k, pool_state, seed_state, seen_state, pool_size_state, query_state],
+        inputs=[top_k, score_range, artist_filter, genre_filter, pool_state, seed_state, seen_state, pool_size_state, query_state],
         outputs=[cards, output, pool_state, seed_state, seen_state, pool_size_state, query_state],
     )
 
     gr.Examples(
         examples=[
-            ["triste", "quiero llorar", 5],
-            ["triste", "quiero fregar el suelo", 5],
-            ["triste", "voy a entrenar en el gym", 5],
-            ["feliz", "voy a estudiar programacion", 5],
-            ["tranquilo", "quiero dormir", 5],
-            ["energico", "voy a limpiar la casa", 5],
+            ["triste", "quiero llorar", "", "Todos", 5],
+            ["triste", "quiero fregar el suelo", "", "Todos", 5],
+            ["triste", "voy a entrenar en el gym", "", "Todos", 5],
+            ["feliz", "voy a estudiar programacion", "", "Todos", 5],
+            ["tranquilo", "quiero dormir", "", "Todos", 5],
+            ["energico", "voy a limpiar la casa", "", "Todos", 5],
         ],
-        inputs=[mood, activity, top_k],
+        inputs=[mood, activity, artist_filter, genre_filter, top_k],
     )
 
 

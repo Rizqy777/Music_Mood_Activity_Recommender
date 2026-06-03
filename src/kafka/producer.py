@@ -32,7 +32,10 @@ def produce_dataset(settings: Settings, dataset: DatasetConfig) -> int:
     total = 0
     remaining = settings.max_rows_per_dataset
 
-    for chunk_number, chunk in enumerate(pd.read_csv(dataset.path, chunksize=settings.producer_batch_size), start=1):
+    for chunk_number, chunk in enumerate(
+        pd.read_csv(dataset.path, chunksize=settings.producer_batch_size, low_memory=False),
+        start=1,
+    ):
         if remaining is not None:
             if remaining <= 0:
                 break

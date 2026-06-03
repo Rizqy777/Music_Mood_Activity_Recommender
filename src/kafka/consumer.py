@@ -33,12 +33,18 @@ def consume_to_bronze(settings: Settings, expected_counts: dict[str, int] | None
     )
     consumer.subscribe(topics)
 
+    if settings.consumer_timeout_seconds is None and not expected_counts:
+        LOGGER.warning(
+            "Consumer timeout disabled and expected counts not provided; consumption will run until interrupted."
+        )
+
     counts: dict[str, int] = defaultdict(int)
     buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    deadline = time.monotonic() + settings.consumer_timeout_seconds
+    timeout_seconds = settings.consumer_timeout_seconds
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
 
     try:
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             msg = consumer.poll(1.0)
             if msg is None:
                 if expected_counts and _counts_met(counts, expected_counts):

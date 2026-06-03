@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,10 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     f1_score,
+    mean_absolute_error,
+    mean_squared_error,
     precision_score,
+    r2_score,
     recall_score,
     roc_auc_score,
 )
@@ -42,6 +46,9 @@ LOGGER = logging.getLogger("train_models")
 
 RANDOM_STATE = 42
 TARGET_COL = "mood_label"
+DEFAULT_OUTPUT_DIR = ROOT / "models"
+OUTPUT_DATA_DIR = ROOT / "data_lake" / "model_outputs" / "mood_classifier"
+PLOTS_DIR = OUTPUT_DATA_DIR / "plots"
 LABEL_NAMES = {
     0: "sad",
     1: "happy",
@@ -74,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT / "models",
+        default=DEFAULT_OUTPUT_DIR,
         help="Carpeta local donde guardar modelos y resumen.",
     )
     parser.add_argument(
@@ -156,6 +163,9 @@ def main() -> None:
             "test_precision_weighted": float(precision_score(y_test, y_pred, average="weighted", zero_division=0)),
             "test_recall_weighted": float(recall_score(y_test, y_pred, average="weighted", zero_division=0)),
             "test_accuracy": float(accuracy_score(y_test, y_pred)),
+            "test_mae": float(mean_absolute_error(y_test, y_pred)),
+            "test_rmse": float(mean_squared_error(y_test, y_pred) ** 0.5),
+            "test_r2": float(r2_score(y_test, y_pred)),
             "test_roc_auc_ovr_macro": roc_auc_ovr,
             "classification_report": report,
         }
@@ -174,16 +184,16 @@ def main() -> None:
         )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    output_data_dir = ROOT / "data_lake" / "model_outputs" / "mood_classifier"
-    plots_dir = output_data_dir / "plots"
+    output_data_dir = OUTPUT_DATA_DIR
+    plots_dir = PLOTS_DIR
     output_data_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     best_result = max(results, key=lambda item: item["test_f1_macro"])
     best_model_name = best_result["model"]
     for model_name, search in fitted_models.items():
-        joblib.dump(search.best_estimator_, args.output_dir / f"mood_{model_name}.joblib")
-    joblib.dump(fitted_models[best_model_name].best_estimator_, args.output_dir / "mood_best_model.joblib")
+        dump_joblib_atomic(search.best_estimator_, args.output_dir / f"mood_{model_name}.joblib")
+    dump_joblib_atomic(fitted_models[best_model_name].best_estimator_, args.output_dir / "mood_best_model.joblib")
 
     metrics_df = pd.DataFrame(
         [
@@ -197,6 +207,9 @@ def main() -> None:
                 "test_precision_weighted": item["test_precision_weighted"],
                 "test_recall_weighted": item["test_recall_weighted"],
                 "test_accuracy": item["test_accuracy"],
+                "test_mae": item["test_mae"],
+                "test_rmse": item["test_rmse"],
+                "test_r2": item["test_r2"],
                 "test_roc_auc_ovr_macro": item["test_roc_auc_ovr_macro"],
                 "best_params": json.dumps(item["best_params"], ensure_ascii=False),
             }
@@ -272,6 +285,27 @@ def resolve_gold_paths(source: str, settings: Any) -> tuple[Path, Path, str]:
             "Ejecuta primero preparacion_datos.ipynb o usa --source s3."
         )
     return local_base / "train", local_base / "test", str(local_base)
+
+
+def dump_joblib_atomic(value: Any, path: Path) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        delete=False,
+        dir=path.parent,
+        prefix=f".{path.stem}.",
+        suffix=".tmp",
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+
+    try:
+        joblib.dump(value, tmp_path)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    return path
 
 
 def download_s3_prefix(settings: Any, prefix: str, target_dir: Path) -> None:

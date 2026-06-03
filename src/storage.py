@@ -18,15 +18,17 @@ class LakeWriter:
         self.settings = settings
         self.s3 = S3DataLake(settings) if settings.use_s3 else None
 
-    def prepare(self) -> None:
+    def prepare(self) -> tuple[str, str] | None:
         self.settings.local_lake_dir.mkdir(parents=True, exist_ok=True)
         LOGGER.info("Local lake directory ready: %s", self.settings.local_lake_dir)
         if self.s3:
             LOGGER.info("Ensuring S3 bucket is available: %s", self.settings.bucket_name)
             self.s3.ensure_bucket()
             LOGGER.info("S3 bucket ready: %s", self.s3.bucket_name)
+            return self.s3.bucket_name, self.s3.bucket_region or self.settings.aws_region
         else:
             LOGGER.info("S3 mirroring disabled")
+        return None
 
     def local_dataset_dir(self, layer: str, dataset: str) -> Path:
         path = self.settings.local_lake_dir / layer / dataset
