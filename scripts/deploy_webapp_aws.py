@@ -50,10 +50,17 @@ def should_include(path: Path) -> bool:
 
 def make_bundle() -> Path:
     target = Path(tempfile.gettempdir()) / f"{PROJECT_TAG}-{int(time.time())}.zip"
+    
+    # 1. Primero creamos y empaquetamos el ZIP
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_path in ROOT.rglob("*"):
             if file_path.is_file() and should_include(file_path):
                 zf.write(file_path, file_path.relative_to(ROOT))
+                
+    # 2. Ahora que el archivo ya existe y está cerrado, medimos su peso
+    size_mb = target.stat().st_size / (1024 * 1024)
+    print(f"Tamaño del empaquetado a subir: {size_mb:.2f} MB")
+    
     return target
 
 
@@ -156,36 +163,55 @@ def terminate_existing(ec2) -> None:
         return
     ec2.terminate_instances(InstanceIds=instance_ids)
     ec2.get_waiter("instance_terminated").wait(InstanceIds=instance_ids)
-
-
 def build_user_data(bundle_url: str) -> str:
     script = f"""#!/bin/bash
 set -euxo pipefail
 dnf update -y
 dnf install -y python3.11 python3.11-pip unzip shadow-utils
+
+# --- NUEVO: CREAR MEMORIA RAM VIRTUAL (SWAP) DE 4GB ---
+# Esto evita que el OOM Killer colapse la web al cargar los modelos
+dd if=/dev/zero of=/swapfile bs=1M count=4096
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+# -----------------------------------------------------
+
 python3.11 -m ensurepip --upgrade || true
 id -u appuser >/dev/null 2>&1 || useradd --system --create-home --shell /sbin/nologin appuser
+
+# 1. Creamos la carpeta principal en el disco duro real
 mkdir -p /opt/music-mood
+
+# 2. Descargamos el ZIP directamente en /opt/ (saltándonos la RAM)
 python3.11 - <<'PY'
 import urllib.request
-urllib.request.urlretrieve("{bundle_url}", "/tmp/music-mood.zip")
+urllib.request.urlretrieve("{bundle_url}", "/opt/music-mood.zip")
 PY
+
+# 3. Limpiamos y descomprimimos usando el archivo que ahora vive en /opt
 rm -rf /opt/music-mood/app
 mkdir -p /opt/music-mood/app
-unzip -q /tmp/music-mood.zip -d /opt/music-mood/app
+unzip -q /opt/music-mood.zip -d /opt/music-mood/app
+
+# Seguimos con la instalación normal de tu entorno
 cd /opt/music-mood/app
 python3.11 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
+
 if [ -f requirements-web.txt ]; then
   .venv/bin/pip install -r requirements-web.txt
 else
   .venv/bin/pip install -r requirements.txt
 fi
+
 .venv/bin/python - <<'PY'
 import web_app
 print("PREIMPORT_OK", web_app.app.title)
 PY
+
 chown -R appuser:appuser /opt/music-mood
+
 cat >/etc/systemd/system/music-mood-web.service <<'SERVICE'
 [Unit]
 Description=Music Mood Activity Web
@@ -206,6 +232,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 SERVICE
+
 systemctl daemon-reload
 systemctl enable --now music-mood-web
 sleep 8
@@ -213,7 +240,6 @@ systemctl status music-mood-web --no-pager -l || true
 journalctl -u music-mood-web -n 80 --no-pager || true
 """
     return base64.b64encode(script.encode("utf-8")).decode("ascii")
-
 
 def deploy(args: argparse.Namespace) -> None:
     _load_env_files()
@@ -248,6 +274,16 @@ def deploy(args: argparse.Namespace) -> None:
         MaxCount=1,
         SecurityGroupIds=[security_group_id],
         UserData=user_data,
+        BlockDeviceMappings=[
+            {
+                "DeviceName": "/dev/xvda",  # Volumen raíz por defecto para Amazon Linux
+                "Ebs": {
+                    "VolumeSize": 30,       # Tamaño en GB
+                    "VolumeType": "gp3",    # gp3 es la generación actual: más rápida y económica
+                    "DeleteOnTermination": True
+                }
+            }
+        ],
         TagSpecifications=[
             {
                 "ResourceType": "instance",
