@@ -9,9 +9,37 @@ from pathlib import Path
 import gradio as gr
 
 from src.recommender import MusicActivityRecommender, normalize_mood
+import pandas as pd
 
 RECOMMENDER = MusicActivityRecommender()
 ROOT = Path(__file__).resolve().parent
+
+SCALER_STATS_PATH = ROOT / "data_lake" / "tmp_gold" / "mood_prepared" / "scaler_stats" / "scaler_stats.parquet"
+
+def get_scaler_stats() -> dict[str, dict[str, float]]:
+    if not SCALER_STATS_PATH.exists():
+        return {}
+    try:
+        stats_df = pd.read_parquet(SCALER_STATS_PATH)
+        stats_dict = {}
+        for _, row in stats_df.iterrows():
+            stats_dict[row["feature"]] = {"mean": float(row["mean"]), "std": float(row["std"])}
+        return stats_dict
+    except Exception as e:
+        print(f"Warning: Could not load scaler stats: {e}")
+        return {}
+
+SCALER_STATS = get_scaler_stats()
+
+def inverse_transform_feature(feature_name: str, value: float) -> float:
+    if pd.isna(value):
+        return value
+    if feature_name in SCALER_STATS:
+        mean = SCALER_STATS[feature_name]["mean"]
+        std = SCALER_STATS[feature_name]["std"]
+        return float(value) * std + mean
+    return float(value)
+
 POOL_MULTIPLIER = 30
 MIN_POOL_SIZE = 50
 MAX_POOL_SIZE = 1000
@@ -188,6 +216,12 @@ def filter_by_mood_match(pool, user_mood: str):
 
 def format_recommendations(recommendations):
     recommendations = recommendations.copy()
+    
+    # Inverse transform features to original scale for UI display
+    for feature in ["danceability", "energy", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "loudness", "tempo", "duration_ms"]:
+        if feature in recommendations.columns:
+            recommendations[feature] = recommendations[feature].apply(lambda x: inverse_transform_feature(feature, x))
+
     display_df = recommendations.rename(
         columns={
             "track_name": "Cancion",
@@ -205,6 +239,16 @@ def format_recommendations(recommendations):
             "audio_predicted_mood": "Mood audio",
             "lyrics_predicted_mood": "Mood letra",
             "mood_contrast": "Contraste audio/letra",
+            "danceability": "Danceability",
+            "energy": "Energy",
+            "speechiness": "Speechiness",
+            "acousticness": "Acousticness",
+            "instrumentalness": "Instrumentalness",
+            "liveness": "Liveness",
+            "valence": "Valence",
+            "loudness": "Loudness",
+            "tempo": "Tempo",
+            "duration_ms": "Duration (ms)",
         }
     )
     warning = None

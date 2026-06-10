@@ -70,9 +70,15 @@ class MusicActivityRecommender:
             else ROOT / "models" / "activity_recommender_mlp.joblib"
         )
         self.catalog_path = catalog_path or ROOT / "data_lake" / "recommender" / "classified_tracks.parquet"
+        self.csv_path = self.catalog_path.with_suffix(".csv")  # Ruta al CSV de tiempo real
         self.model = joblib.load(self.model_path)
-        self.catalog = pd.read_parquet(self.catalog_path)
-        self._catalog_mtime = self.catalog_path.stat().st_mtime if self.catalog_path.exists() else None
+        
+        # Inicializamos vacíos para que reload_catalog los cargue por primera vez
+        self.catalog = pd.DataFrame()
+        self._catalog_mtime = None
+        self._csv_mtime = None
+        self.reload_catalog_if_changed()
+        
         self.activity_interpreter = ActivityTextInterpreter()
 
     def recommend(
@@ -162,18 +168,56 @@ class MusicActivityRecommender:
             "audio_predicted_mood",
             "lyrics_predicted_mood",
             "mood_contrast",
+            "danceability",
+            "energy",
+            "speechiness",
+            "acousticness",
+            "instrumentalness",
+            "liveness",
+            "valence",
+            "loudness",
+            "tempo",
+            "duration_ms",
         ]
         available = [col for col in columns if col in scored.columns]
         result = scored.sort_values("recommendation_score", ascending=False).head(top_k)[available].copy()
         return result
 
     def reload_catalog_if_changed(self) -> None:
-        if not self.catalog_path.exists():
-            return
-        current_mtime = self.catalog_path.stat().st_mtime
-        if self._catalog_mtime is None or current_mtime > self._catalog_mtime:
-            self.catalog = pd.read_parquet(self.catalog_path)
-            self._catalog_mtime = current_mtime
+        catalog_changed = False
+        csv_changed = False
+        
+        # 1. Validar si el Parquet base ha cambiado
+        if self.catalog_path.exists():
+            current_catalog_mtime = self.catalog_path.stat().st_mtime
+            if self._catalog_mtime is None or current_catalog_mtime > self._catalog_mtime:
+                self._catalog_mtime = current_catalog_mtime
+                catalog_changed = True
+                
+        # 2. Validar si el CSV en tiempo real tiene nuevos appends
+        if self.csv_path.exists():
+            current_csv_mtime = self.csv_path.stat().st_mtime
+            if self._csv_mtime is None or current_csv_mtime > self._csv_mtime:
+                self._csv_mtime = current_csv_mtime
+                csv_changed = True
+                
+        # 3. Si cualquiera de los dos archivos se ha movido, fusionamos en caliente
+        if catalog_changed or csv_changed or self.catalog.empty:
+            dfs = []
+            if self.catalog_path.exists():
+                dfs.append(pd.read_parquet(self.catalog_path))
+            if self.csv_path.exists():
+                try:
+                    dfs.append(pd.read_csv(self.csv_path))
+                except Exception:
+                    pass
+            
+            if dfs:
+                # Combinamos ambos orígenes de datos y purgamos duplicados manteniendo el último
+                combined = pd.concat(dfs, ignore_index=True, sort=False)
+                self.catalog = combined.drop_duplicates(subset=["track_id"], keep="last")
+            else:
+                self.catalog = pd.DataFrame()
 
 
 def normalize_artist_text(value: str) -> str:

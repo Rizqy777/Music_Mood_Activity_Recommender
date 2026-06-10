@@ -44,7 +44,8 @@ def should_include(path: Path) -> bool:
     if relative.parts and relative.parts[0] == "datasets":
         return False
     if relative.parts and relative.parts[0] == "data_lake":
-        return len(relative.parts) >= 2 and relative.parts[1] == "recommender"
+        return (len(relative.parts) >= 2 and relative.parts[1] == "recommender") or \
+               (len(relative.parts) >= 3 and "tmp_gold" in relative.parts)
     return True
 
 
@@ -128,7 +129,9 @@ def ensure_security_group(ec2, vpc_id: str) -> str:
             ],
         )
         group_id = created["GroupId"]
-    for port in (80,):
+        
+    # --- AQUÍ ESTÁ EL CAMBIO PRINCIPAL: AÑADIMOS EL PUERTO 22 ---
+    for port in (80, 22):
         try:
             ec2.authorize_security_group_ingress(
                 GroupId=group_id,
@@ -163,6 +166,7 @@ def terminate_existing(ec2) -> None:
         return
     ec2.terminate_instances(InstanceIds=instance_ids)
     ec2.get_waiter("instance_terminated").wait(InstanceIds=instance_ids)
+    
 def build_user_data(bundle_url: str) -> str:
     script = f"""#!/bin/bash
 set -euxo pipefail
@@ -178,7 +182,7 @@ swapon /swapfile
 # -----------------------------------------------------
 
 python3.11 -m ensurepip --upgrade || true
-id -u appuser >/dev/null 2>&1 || useradd --system --create-home --shell /sbin/nologin appuser
+id -u appuser >/dev/null 2>&1 || useradd --system --create-home --shell /bin/bash appuser
 
 # 1. Creamos la carpeta principal en el disco duro real
 mkdir -p /opt/music-mood
@@ -312,7 +316,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Despliega la web unificada en AWS EC2.")
     parser.add_argument("--region", default=None, help="Region AWS. Por defecto usa AWS_DEFAULT_REGION o us-east-1.")
     parser.add_argument("--bucket", default=None, help="Bucket S3 para subir el paquete de despliegue.")
-    parser.add_argument("--instance-type", default=os.getenv("AWS_WEB_INSTANCE_TYPE", "t3.medium"))
+    parser.add_argument("--instance-type", default=os.getenv("AWS_WEB_INSTANCE_TYPE", "m5.large"))
     parser.add_argument("--ami-id", default=None, help="AMI opcional. Por defecto usa Amazon Linux 2023.")
     parser.add_argument("--keep-existing", action="store_true", help="No termina instancias anteriores del mismo proyecto.")
     return parser.parse_args()

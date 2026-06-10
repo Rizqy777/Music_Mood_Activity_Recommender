@@ -1,0 +1,14 @@
+Aprendizaje clásico
+k-Nearest Neighbors (kNN)
+Regresión Lineal
+Regresión Polinómica
+Support Vector Machines (SVM)
+Árboles de Decisión
+Bosques Aleatorios (Random Forest)
+Redes neuronales
+Redes neuronales densas (feedforward/secuenciales)
+Redes neuronales funcionales
+Redes neuronales recurrentes (RNN)
+Redes neuronales convolucionales (CNN)
+Autoencoders
+GANs

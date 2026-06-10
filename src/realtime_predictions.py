@@ -130,14 +130,28 @@ class RealtimeMoodClassifier:
 
     def _append_to_catalog(self, classified: pd.DataFrame) -> None:
         self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        if self.catalog_path.exists():
-            catalog = pd.read_parquet(self.catalog_path)
-            updated = pd.concat([catalog, classified], ignore_index=True, sort=False)
-            updated = updated.drop_duplicates("track_id", keep="last")
+        
+        if CATALOG_CSV_PATH.exists():
+            try:
+                # Leemos SOLO los encabezados del CSV existente (tarda microsegundos)
+                existing_headers = list(pd.read_csv(CATALOG_CSV_PATH, nrows=0).columns)
+                
+                # Si falta alguna columna en el nuevo track, la rellenamos con NaN
+                for col in existing_headers:
+                    if col not in classified.columns:
+                        classified[col] = np.nan
+                
+                # Forzamos a que el nuevo track tenga EXACTAMENTE el mismo orden de columnas
+                classified_aligned = classified[existing_headers]
+                
+                # Hacemos el append seguro sin cabecera
+                classified_aligned.to_csv(CATALOG_CSV_PATH, mode='a', header=False, index=False)
+            except Exception:
+                # Fallback por si el archivo estaba vacío o corrupto
+                classified.to_csv(CATALOG_CSV_PATH, mode='a', header=False, index=False)
         else:
-            updated = classified.copy()
-        updated.to_parquet(self.catalog_path, index=False)
-        updated.to_csv(CATALOG_CSV_PATH, index=False)
+            # Si el archivo no existe, lo creamos de cero con sus cabeceras
+            classified.to_csv(CATALOG_CSV_PATH, index=False)
 
 
 def prepare_input_frame(frame: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
@@ -323,9 +337,8 @@ def read_uploaded_table(path: str | Path) -> pd.DataFrame:
 
 def append_history(classified: pd.DataFrame) -> None:
     HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if HISTORY_PATH.exists():
-        previous = pd.read_csv(HISTORY_PATH)
-        updated = pd.concat([previous, classified], ignore_index=True, sort=False)
-    else:
-        updated = classified.copy()
-    updated.to_csv(HISTORY_PATH, index=False)
+    
+    # Escribimos directo al final del archivo con mode='a'. 
+    # Ni siquiera cargamos el CSV en memoria.
+    write_header = not HISTORY_PATH.exists()
+    classified.to_csv(HISTORY_PATH, mode='a', header=write_header, index=False)
